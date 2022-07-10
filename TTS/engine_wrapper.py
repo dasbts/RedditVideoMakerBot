@@ -2,13 +2,17 @@
 from pathlib import Path
 from typing import Tuple
 import re
-from os import getenv
-from mutagen.mp3 import MP3
+import time
+import os
+# import sox
+# from mutagen import MutagenError
+# from mutagen.mp3 import MP3, HeaderNotFoundError
 import translators as ts
 from rich.progress import track
 from moviepy.editor import AudioFileClip, CompositeAudioClip, concatenate_audioclips
 from utils.console import print_step, print_substep
 from utils.voice import sanitize_text
+from utils import settings
 
 DEFUALT_MAX_LENGTH: int = 50  # video length variable
 
@@ -53,7 +57,10 @@ class TTSEngine:
         print_step("Saving Text to MP3 files...")
 
         self.call_tts("title", self.reddit_object["thread_title"])
-        if self.reddit_object["thread_post"] != "" and getenv("STORYMODE", "").casefold() == "true":
+        if (
+            self.reddit_object["thread_post"] != ""
+            and settings.config["settings"]["storymode"] == True
+        ):
             self.call_tts("posttext", self.reddit_object["thread_post"])
 
         idx = None
@@ -64,38 +71,72 @@ class TTSEngine:
             if not self.tts_module.max_chars:
                 self.call_tts(f"{idx}", comment["comment_body"])
             else:
-                self.split_post(comment["comment_body"], idx)
+                # THESE TRY EXCEPTS SOMEHOW SOLVES FFMPEG ERROR #
+                try:
+                    self.split_post(comment["comment_body"], idx)
+                except:
+                    print('Error, removing '+f"{self.path}/{idx}-0.part.mp3") # It still continues
+                    try:
+                        os.remove(f"{self.path}/{idx}-0.part.mp3")
+                    except:
+                        pass
+
 
         print_substep("Saved Text to MP3 files successfully.", style="bold green")
         return self.length, idx
 
-    def split_post(self, text: str, idx: int) -> str:
+    def split_post(self, text: str, idx: int):
         split_files = []
         split_text = [
             x.group().strip()
-            for x in re.finditer(rf" *((.{{0,{self.tts_module.max_chars}}})(\.|.$))", text)
+            for x in re.finditer(rf" *((.{{0,{self.tts_module.max_chars}}})(.$| $|\n | \n))", text)
         ]
 
         idy = None
         for idy, text_cut in enumerate(split_text):
             # print(f"{idx}-{idy}: {text_cut}\n")
             self.call_tts(f"{idx}-{idy}.part", text_cut)
-            split_files.append(AudioFileClip(f"{self.path}/{idx}-{idy}.part.mp3"))
+            # THESE TRY EXCEPTS SOMEHOW SOLVES FFMPEG ERROR #
+            try:
+                split_files.append(AudioFileClip(f"{self.path}/{idx}-{idy}.part.mp3"))
+            except:
+                print('Error, removing '+f"{self.path}/{idx}-{idy}.part.mp3")
+                try:
+                    os.remove(f"{self.path}/{idx}-{idy}.part.mp3")
+                except:
+                    pass
+        ### !!! Without the following sleep (preferably 1sec), sometimes a part seem to be missing, causing errors or bad renders, 
+        #feel free to try for example same thread 500 times and see how many times it renders the same amount of .mp3 files (not parts), 
+        #can probably build a tracker for this to count how many times each part renders !!! ###
+        time.sleep(0.5) 
         CompositeAudioClip([concatenate_audioclips(split_files)]).write_audiofile(
             f"{self.path}/{idx}.mp3", fps=44100, verbose=False, logger=None
         )
+        for i in split_files:
+            name = i.filename
+            i.close()
+            Path(name).unlink()
 
-        for i in range(0, idy + 1):
-            # print(f"Cleaning up {self.path}/{idx}-{i}.part.mp3")
-            Path(f"{self.path}/{idx}-{i}.part.mp3").unlink()
+        # for i in range(0, idy + 1):
+        # print(f"Cleaning up {self.path}/{idx}-{i}.part.mp3")
+
+        # Path(f"{self.path}/{idx}-{i}.part.mp3").unlink()
 
     def call_tts(self, filename: str, text: str):
         self.tts_module.run(text=process_text(text), filepath=f"{self.path}/{filename}.mp3")
-        self.length += MP3(f"{self.path}/{filename}.mp3").info.length
-
+        # try:
+        #     self.length += MP3(f"{self.path}/{filename}.mp3").info.length
+        # except (MutagenError, HeaderNotFoundError):
+        #     self.length += sox.file_info.duration(f"{self.path}/{filename}.mp3")
+        try:
+            clip = AudioFileClip(f"{self.path}/{filename}.mp3")
+            self.length += clip.duration
+            clip.close()
+        except:
+            self.length = 0
 
 def process_text(text: str):
-    lang = getenv("POSTLANG", "")
+    lang = settings.config["reddit"]["thread"]["post_lang"]
     new_text = sanitize_text(text)
     if lang:
         print_substep("Translating Text...")
